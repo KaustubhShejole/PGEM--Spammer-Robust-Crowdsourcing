@@ -780,3 +780,144 @@ class CrowdBT_2_0:
 
         return x0.detach(), y0.detach()
 
+
+from tqdm import tqdm
+
+
+class CrowdBT_3_0:
+    """
+    Fast, vectorized CrowdBT implementation
+    """
+
+    def __init__(
+        self,
+        data,
+        device,
+        random_seed=42,
+        penalty=0.0,
+        dtype=torch.float32,
+        clamp_scores=20.0,
+    ):
+        """
+        data: dict mapping reviewer i -> iterable of (winner, loser)
+        """
+        self.device = device
+        self.dtype = dtype
+        self.penalty = penalty
+        self.random_seed = random_seed
+        self.clamp_scores = clamp_scores
+
+        # -------- Preprocess data once --------
+        win_all = []
+        los_all = []
+        rev_all = []
+
+        for i, pairs in data.items():
+            if len(pairs) == 0:
+                continue
+            pairs = torch.tensor(
+                list(pairs), device=device, dtype=torch.long
+            )
+            n = pairs.shape[0]
+            win_all.append(pairs[:, 0])
+            los_all.append(pairs[:, 1])
+            rev_all.append(torch.full((n,), i, device=device))
+
+        self.win_idx = torch.cat(win_all)
+        self.los_idx = torch.cat(los_all)
+        self.rev_idx = torch.cat(rev_all)
+
+        self.num_pairs = self.win_idx.numel()
+
+    # ----------------------------------------------------
+    # Objective (fully vectorized)
+    # ----------------------------------------------------
+    def crowdbt_objective(self, scores, reliabilities):
+        """
+        Negative penalized log-likelihood
+        """
+        # Optional clamp for numerical stability
+        scores = torch.clamp(scores, -self.clamp_scores, self.clamp_scores)
+
+        pw = torch.exp(scores[self.win_idx])
+        pl = torch.exp(scores[self.los_idx])
+        denom = pw + pl
+
+        r = reliabilities[self.rev_idx]
+        prob = r * pw / denom + (1.0 - r) * pl / denom
+
+        loss = -torch.sum(torch.log(prob + 1e-12))
+
+        if self.penalty > 0:
+            loss = loss + self.penalty * torch.sum(scores ** 2)
+
+        return loss
+
+    # ----------------------------------------------------
+    # Alternating optimization
+    # ----------------------------------------------------
+    def alternate_optim(
+        self,
+        num_items,
+        num_reviewers,
+        iters=100,
+        lr_x=0.05,
+        lr_y=0.05,
+        tol=1e-6,
+        verbose=True,
+    ):
+        """
+        Returns:
+            scores: (num_items,)
+            reliabilities: (num_reviewers,)
+        """
+        torch.manual_seed(self.random_seed)
+
+        # Initialize parameters
+        scores = torch.zeros(
+            num_items,
+            device=self.device,
+            dtype=self.dtype,
+            requires_grad=True,
+        )
+
+        reliabilities = torch.rand(
+            num_reviewers,
+            device=self.device,
+            dtype=self.dtype,
+            requires_grad=True,
+        )
+
+        # Optimizers (created ONCE)
+        opt_x = torch.optim.Adam([scores], lr=lr_x)
+        opt_y = torch.optim.Adam([reliabilities], lr=lr_y)
+
+        prev_loss = None
+
+        loop = tqdm(range(iters), disable=not verbose)
+        for _ in loop:
+
+            # ---- Update item scores ----
+            opt_x.zero_grad()
+            loss_x = self.crowdbt_objective(scores, reliabilities.detach())
+            loss_x.backward()
+            opt_x.step()
+
+            # ---- Update reviewer reliabilities ----
+            opt_y.zero_grad()
+            loss_y = self.crowdbt_objective(scores.detach(), reliabilities)
+            loss_y.backward()
+            opt_y.step()
+
+            # Enforce [0, 1] constraint
+            reliabilities.data.clamp_(0.0, 1.0)
+
+            loss_val = loss_x.item()
+            loop.set_postfix(loss=loss_val)
+
+            # Convergence check
+            if prev_loss is not None and abs(prev_loss - loss_val) < tol:
+                break
+            prev_loss = loss_val
+
+        return scores.detach(), reliabilities.detach()

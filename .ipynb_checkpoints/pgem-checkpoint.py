@@ -31,7 +31,7 @@ class EMWrapper:
         print(self.device)
         self.random_seed = random_seed
         self.comparisons = self._get_compatible_data(df_by_worker)
-        print(self.comparisons[:5])
+#         print(self.comparisons[:5])
         self.max_iter = max_iter
         random.seed(self.random_seed)
 
@@ -43,7 +43,7 @@ class EMWrapper:
             max(winner, loser) for winner, loser, _ in self.comparisons
         )
         self.num_items = max_index + 1
-
+        
 #         print("init done", self.comparisons)
 
     def _get_compatible_data(self, data):
@@ -73,213 +73,332 @@ class EMWrapper:
         return r_est, b_est, ll
 
 
-import torch
-import torch.nn.functional as F
-import numpy as np
-import scipy.sparse as sp
-import scipy.sparse.linalg as spla
-from tqdm import tqdm 
-
-# Define the target data type
-DTYPE = torch.float64 
-
-# Utility function for converting arrays to tensors
-def to_tensor(x, dtype=DTYPE, device=None):
-    """Convert numpy array or list to torch tensor."""
-    if isinstance(x, np.ndarray):
-        # Ensure NumPy array is float64 before conversion
-        if x.dtype != np.float64:
-             x = x.astype(np.float64)
-        return torch.from_numpy(x).to(dtype=dtype, device=device)
-    return torch.tensor(x, dtype=dtype, device=device)
 
 class PolyaGamma_EM:
     def __init__(self, num_items, num_workers, max_iter=500, epsilon=1e-6, device='cuda', random_seed=45):
         self.device = device
-        print(f"Device: {self.device}")
+        print(self.device)
         self.random_seed = random_seed
-        
-        # Set seeds for reproducibility
         torch.manual_seed(self.random_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(self.random_seed)
-            torch.cuda.manual_seed_all(self.random_seed)
+            torch.cuda.manual_seed_all(self.random_seed)  # For multi-GPU
+
         np.random.seed(self.random_seed)
 
         self.num_items = num_items
         self.num_workers = num_workers
         self.max_iter = max_iter
         self.epsilon = epsilon
-        
-        # --- FIX: Initialize all main tensors with DTYPE=torch.float64 ---
-        
-        # Initialize parameters with zero-mean constraint for r
-        self.r = torch.randn(num_items, device=device, dtype=DTYPE)
-        self.r -= self.r.mean() 
-        
-        # Initialize beta in [-1, 1]
-        self.beta = (2 * torch.rand(num_workers, device=device, dtype=DTYPE) - 1.0)
-        
-        # Pre-allocated tensors for comparison processing (indices)
+
+        # Initialize parameters with identifiability constraints
+        self.r = torch.randn(num_items, device=device)
+#         self.r = torch.zeros(num_items, device=device)
+        # self.r = 1000.0 * torch.randn(num_items, device=device)
+        self.r -= self.r.mean()  # Zero-mean initialization
+
+        self.beta = (2 * torch.rand(num_workers, device=device) - 1.0).clone()
+        # self.beta = 0 + 0.01 * torch.randn(num_workers, device=device)
+
+        # Pre-allocated tensors for comparison processing
         self.winner_idx = None
         self.loser_idx = None
         self.worker_idx = None
 
     def _log_likelihood(self):
-        """
-        Calculates the mean log-likelihood using F.logsigmoid for 
-        numerical stability, preventing premature convergence due to NaN/inf.
-        """
+#         print("BETA:", self.beta)
+#         print("rewards:", self.r)
         logits = self.beta[self.worker_idx] * (self.r[self.winner_idx] - self.r[self.loser_idx])
-        return F.logsigmoid(logits).mean()
+#         print("LOGITS:", logits)
+#         are_all_close_to_zero = torch.allclose(logits, torch.zeros_like(logits), rtol=1e-6, atol=1e-6)
+#         print("All elements are close to zero:", are_all_close_to_zero)
+#         print("sigmoid logits:", torch.sigmoid(logits))
+#         print("log_likelihood:", torch.log(torch.sigmoid(logits) + 1e-8))
+        return torch.log(torch.sigmoid(logits) + 1e-8).mean()
 
     def _compute_pg_expectations(self):
-        """E-step: Compute E[omega] (kappas) with stable computation."""
         deltas = self.r[self.winner_idx] - self.r[self.loser_idx]
         x = self.beta[self.worker_idx] * deltas
         
         abs_x = x.abs()
         
-        # Numerically stable computation of E[omega] = kappa
         kappas = torch.where(
-            abs_x < 1e-6, 
-            0.25 - (x**2) / 48.0, 
-            0.5 * torch.tanh(x / 2.0) / (x / 2.0)
+            abs_x < 1e-8,
+            0.25 - (x**2)/48.0,                # Taylor approx for small x
+            torch.tanh(x/2) / (2*x)            # exact for other x
         )
+
+#         mask = x.abs() < 1e-8
+
+#         # Vectorized computation using Taylor approximation for stability
+#         kappas = torch.zeros_like(x)
+#         kappas[mask] = 0.25 - (x[mask]**2)/48.0
+#         kappas[~mask] = torch.tanh(x[~mask]/2) / (2*x[~mask])
+
         return kappas
     
     def _update_competencies(self, kappas):
-        """
-        M-step (Beta): Update worker competencies (beta).
-        FIX: Ensures numerator/denominator are created with DTYPE.
-        """
         deltas = self.r[self.winner_idx] - self.r[self.loser_idx]
 
+        # Vectorized contributions
         num_contrib = 0.5 * deltas
         denom_contrib = kappas * deltas**2
 
-        # FIX: Explicitly set DTYPE for aggregation tensors
-        numerator = torch.zeros(self.num_workers, device=self.device, dtype=DTYPE)
-        denominator = torch.zeros(self.num_workers, device=self.device, dtype=DTYPE)
-        
-        # This is where the original RuntimeError occurred. Now types match (Double).
+        # Aggregate by worker
+        numerator = torch.zeros(self.num_workers, device=self.device)
+        denominator = torch.zeros(self.num_workers, device=self.device)
         numerator.index_add_(0, self.worker_idx, num_contrib)
         denominator.index_add_(0, self.worker_idx, denom_contrib)
 
-        valid = denominator > 1e-8 
+        # Update competencies with stability checks
+        valid = denominator > 1e-6
         self.beta[valid] = numerator[valid] / denominator[valid]
-            
-        # Re-clamp beta after update
-        self.beta = torch.clamp(self.beta, min=-1.0, max=1.0)
+
+#         self.beta[~valid] = 0  # Default for workers with no valid comparisons
+#         if len(self.beta[~valid]) > 0:
+#             print(f"Invalid betas: {self.beta[~valid]}")
     
+    
+    import torch
+
     def _update_rewards(self, kappas):
-        """
-        M-step (R): Update item rewards (r) by solving the linear system Hr = b.
-        FIX: Ensures b is created with DTYPE and r_np is converted back with DTYPE.
-        """
         num_items = self.num_items
         device = self.device
+        beta = self.beta
 
-        beta_sq = self.beta[self.worker_idx] ** 2
+        # 1. Faster Sparse Construction
+        beta_sq = beta[self.worker_idx] ** 2
         summands = beta_sq * kappas
 
-        # --- Constructing the Hessian (H) Matrix (Sparse) ---
         rows = torch.cat([self.winner_idx, self.loser_idx, self.winner_idx, self.loser_idx])
         cols = torch.cat([self.winner_idx, self.loser_idx, self.loser_idx, self.winner_idx])
         vals = torch.cat([summands, summands, -summands, -summands])
-        
-        # --- Constructing the RHS Vector (b) ---
-        # FIX: Explicitly set DTYPE
-        b = torch.zeros(num_items, device=device, dtype=DTYPE)
-        b_i_vals = 0.5 * self.beta[self.worker_idx]
+
+        # Keep H as a sparse tensor to save memory and avoid dense conversion overhead
+        indices = torch.stack([rows, cols], dim=0)
+        H_sparse = torch.sparse_coo_tensor(indices, vals, (num_items, num_items), device=device).coalesce()
+
+        # 2. Build RHS vector b (Vectorized)
+        b = torch.zeros(num_items, device=device)
+        b_i_vals = 0.5 * beta[self.worker_idx]
         b.index_add_(0, self.winner_idx, b_i_vals)
         b.index_add_(0, self.loser_idx, -b_i_vals)
 
-        # --- Solving Hr = b using SciPy's Conjugate Gradient (CG) Solver ---
-        
-        # 1. Convert PyTorch COO components to SciPy CSR format
-        rows_np = rows.cpu().numpy()
-        cols_np = cols.cpu().numpy()
-        # SciPy/NumPy defaults to float64, which is DTYPE
-        vals_np = vals.cpu().numpy() 
-        
-        H_sparse = sp.coo_matrix(
-            (vals_np, (rows_np, cols_np)), 
-            shape=(num_items, num_items)
-        ).tocsr()
-        
-        # 2. Add regularization/conditioning term
-        reg_factor = 1e-8 
-        H_reg = H_sparse + reg_factor * sp.identity(num_items, format='csr')
+        # 3. GPU-Accelerated Conjugate Gradient
+        # We replace scipy.sparse.linalg.cg with a native PyTorch CG solver
+        # This avoids the costly .cpu().numpy() transfer.
+        r = self._torch_cg(H_sparse, b, r0=self.r, max_iter=500, tol=1e-5, reg=1e-8)
 
-        b_np = b.cpu().numpy()
+        # Apply zero-mean constraint
+        self.r = r - r.mean()
 
-        # 3. Solve the linear system
-        r_np, info = spla.cg(H_reg, b_np, atol=1e-6, maxiter=500)
-        
-        # Check for CG solver failure
-        if info != 0:
-            tqdm.write(f"Warning: CG solver failed to converge (status: {info}). This can indicate an issue with regularization or data.")
+#     def _torch_cg(self, A_sparse, b, r0=None, max_iter=500, tol=1e-5, reg=1e-8):
+#         """
+#         Pure PyTorch implementation of Conjugate Gradient.
+#         Solves (A + reg*I)x = b
+#         """
+#         x = r0 if r0 is not None else torch.zeros_like(b)
 
-        # 4. Convert back to torch and enforce zero-mean constraint
-        # FIX: Explicitly use DTYPE for conversion
-        r = torch.from_numpy(r_np).to(device=device, dtype=DTYPE)
-        r -= r.mean()
-        
-        self.r = r
+#         # Helper for matrix-vector product (A + reg*I) @ x
+#         def mvp(v):
+#             return torch.matmul(A_sparse, v.unsqueeze(1)).squeeze(1) + reg * v
+
+#         r = b - mvp(x)
+#         if torch.norm(r) < tol:
+#             return x
+
+#         p = r.clone()
+#         rdotr = torch.dot(r, r)
+
+#         for i in range(max_iter):
+#             Ap = mvp(p)
+#             alpha = rdotr / torch.dot(p, Ap)
+#             x = x + alpha * p
+#             r = r - alpha * Ap
+
+#             new_rdotr = torch.dot(r, r)
+#             if torch.sqrt(new_rdotr) < tol:
+#                 break
+
+#             beta = new_rdotr / rdotr
+#             p = r + beta * p
+#             rdotr = new_rdotr
+
+#         return x
+#     def _torch_cg(self, A_sparse, b, r0=None, max_iter=500, tol=1e-5, reg=1e-8):
+#         """
+#         Pure PyTorch implementation of Conjugate Gradient.
+#         Solves (A + reg*I)x = b
+#         """
+#         x = r0 if r0 is not None else torch.zeros_like(b)
+
+#         # Helper for matrix-vector product (A + reg*I) @ x
+#         def mvp(v):
+#             return torch.matmul(A_sparse, v.unsqueeze(1)).squeeze(1) + reg * v
+
+#         r = b - mvp(x)
+#         print("r", r)
+#         if torch.norm(r) < tol:
+#             return x
+
+#         p = r.clone()
+#         rdotr = torch.dot(r, r)
+
+#         for i in range(max_iter):
+#             Ap = mvp(p)
+
+#             denom = torch.dot(p, Ap)
+#             if denom.abs() < 1e-12:  # Prevent division by zero or very small values
+#                 denom = 1e-12
+
+#             alpha = rdotr / denom
+#             x = x + alpha * p
+#             r = r - alpha * Ap
+
+#             new_rdotr = torch.dot(r, r)
+#             if torch.sqrt(new_rdotr) < tol:
+#                 break
+
+#             beta = new_rdotr / rdotr
+#             p = r + beta * p
+#             rdotr = new_rdotr
+
+#             # Check for NaNs in residual or solution
+#             if torch.any(torch.isnan(r)) or torch.any(torch.isnan(x)):
+#                 print("r", r)
+#                 raise ValueError(f"NaN detected in residual or solution at iteration {i}")
+
+#         return x
+    import torch
+
+    def _torch_cg(self, A_sparse, b, r0=None, max_iter=500, tol=1e-5, reg=1e-8):
+        # 1. High-precision promotion
+        orig_dtype = b.dtype
+        b_64 = b.detach().to(torch.float64)
+        A_64 = A_sparse.detach().to(torch.float64)
+        x = r0.to(torch.float64) if r0 is not None else torch.zeros_like(b_64)
+
+        def mvp(v):
+            if A_64.is_sparse:
+                return torch.sparse.mm(A_64, v.unsqueeze(1)).squeeze(1) + reg * v
+            return torch.matmul(A_64, v.unsqueeze(1)).squeeze(1) + reg * v
+
+        # 2. Construct Diagonal Preconditioner (Jacobi)
+        # Extract diagonal: A_ii + reg
+        if A_64.is_sparse:
+            # For sparse COO, find indices where row == col
+            indices = A_64._indices()
+            values = A_64._values()
+            mask = (indices[0] == indices[1])
+            diag = torch.zeros(b_64.size(0), device=b_64.device, dtype=torch.float64)
+            diag[indices[0][mask]] = values[mask]
+            diag += reg
+        else:
+            diag = torch.diag(A_64) + reg
+
+        # M_inv scales the residual to be near 1.0 based on the matrix scale
+        M_inv = 1.0 / (diag + 1e-12) 
+
+        r = b_64 - mvp(x)
+        z = M_inv * r  # This is your "scaled" residual
+        p = z.clone()
+        rdotz = torch.dot(r, z)
+
+        if torch.sqrt(rdotz) < tol:
+            return x.to(orig_dtype)
+
+        for i in range(max_iter):
+            Ap = mvp(p)
+
+            denom = torch.dot(p, Ap)
+            if denom <= 1e-16: # Stability break
+                break
+
+            alpha = rdotz / denom
+            x = x + alpha * p
+
+            # Periodic refresh for stability
+            if i % 50 == 0:
+                r = b_64 - mvp(x)
+            else:
+                r = r - alpha * Ap
+
+            z = M_inv * r  # Apply scaling/preconditioning
+            new_rdotz = torch.dot(r, z)
+
+            if torch.norm(r) < tol:
+                break
+
+            beta = new_rdotz / (rdotz + 1e-16)
+            p = z + beta * p
+            rdotz = new_rdotz
+
+            if torch.isnan(x).any():
+                break
+
+        return x.to(orig_dtype)
+    
+    def _check_convergence(self, prev_r, prev_beta):
+        r_diff = torch.norm(self.r - prev_r)
+        beta_diff = torch.norm(self.beta - prev_beta)
+        return r_diff < self.epsilon and beta_diff < self.epsilon
     
     def fit(self, comparisons):
-        """
-        Fits the model to a list of comparisons: [(win_idx, lose_idx, worker_idx), ...].
-        """
-        # Convert comparisons to tensor indices (indices should be long/int)
+        # Convert comparisons to tensor indices
         comparisons_tensor = torch.tensor(comparisons, dtype=torch.long, device=self.device)
         self.winner_idx = comparisons_tensor[:, 0]
         self.loser_idx = comparisons_tensor[:, 1]
         self.worker_idx = comparisons_tensor[:, 2]
+#         print(self.winner_idx[:5])
+#         print(self.loser_idx[:5])
+#         print(self.worker_idx[:5])
 
-        # FIX: Calculate and print initial LL
-        prev_ll = self._log_likelihood().item() 
-        tqdm.write(f"Initial Log-likelihood: {prev_ll:.6f}")
+        prev_r = self.r.clone()
+        prev_beta = self.beta.clone()
+        prev_ll = -float("inf")
         
-        M_STEP_INNER_ITERS = 5 
+#         print(prev_r, prev_beta, "max iter: ", self.max_iter)
 
-        # --- Optimization Loop ---
-        for iter in tqdm(range(self.max_iter), desc="PG-EM Optimization"):
-            # E-step
+        for iter in tqdm(range(self.max_iter)):
+            # E-step: Compute Polya-Gamma expectations
             kappas = self._compute_pg_expectations()
+#             print("printing kappas for first step", kappas)
 
-            # M-step
-            for _ in range(M_STEP_INNER_ITERS):
-                self._update_competencies(kappas) 
-                self._update_rewards(kappas)      
-            
+            # M-step: Update parameters
+            for _ in range(10):
+#                 print("M step iter number: ", _)
+                self._update_competencies(kappas) # beta vector
+#                 print("beta done")
+                self._update_rewards(kappas)      # r vector
+#                 print("r done")
+
             # Enforce identifiability constraints
-            self.r -= self.r.mean() 
-            self.beta = torch.clamp(self.beta, min=-1.0, max=1.0)
-            
-            # --- Convergence Check ---
+            self.r -= self.r.mean()
+            self.beta = torch.clamp(self.beta, min=-1, max=1)
+
+            # Compute log-likelihood
             ll = self._log_likelihood().item()
-            
             if iter % 100 == 0:
-                tqdm.write(f"Iter {iter:03d}: Log-likelihood = {ll:.6f}")
+                print(f"Iter {iter:03d}: Log-likelihood = {ll:.6f}")
 
             # Convergence based on log-likelihood change
-            if abs(ll - prev_ll) < self.epsilon and iter > 0:
-                tqdm.write(f"Converged at iter {iter}, Log-likelihood change = {ll - prev_ll:.6e}")
+            if abs(ll - prev_ll) < self.epsilon:
+                print(f"Converged at iter {iter}, Log-likelihood change = {ll - prev_ll:.6e}")
                 break
 
             prev_ll = ll
 
-        # Return CPU tensors
-        return self.r.cpu(), self.beta.cpu(), self._log_likelihood().item()
-    
-    
+            prev_r = self.r.clone()
+            prev_beta = self.beta.clone()
+
+        return self.r.cpu().numpy(), self.beta.cpu().numpy(), self._log_likelihood().item()
 
 def to_tensor(x, dtype=None, device=None):
     if isinstance(x, np.ndarray):
         return torch.from_numpy(x).to(dtype=dtype, device=device)
     return torch.tensor(x, dtype=dtype, device=device)
+
+
 
 class PolyaGamma_EM_2_0:
     def __init__(self, num_items, num_workers, r=None, beta=None, max_iter=500, epsilon=1e-6, device='cuda', random_seed=45):
@@ -396,7 +515,7 @@ class PolyaGamma_EM_2_0:
 #         b_i_vals = 0.5 * beta[self.worker_idx]
 #         b.index_add_(0, self.winner_idx, b_i_vals)
 #         b.index_add_(0, self.loser_idx, -b_i_vals)
-
+        
 
 
 #         H = torch.zeros((num_items, num_items), device=device)        
@@ -407,18 +526,18 @@ class PolyaGamma_EM_2_0:
 #             ki = self.worker_idx[i]
 #             summand_i = summands[i]
 #             beta_i = beta[ki]
-
+            
 #             # diagonal terms
 #             H[wi, wi] += summand_i
 #             H[li, li] += summand_i
 #             # non diagonal terms
 #             H[wi, li] -= summand_i
 #             H[li, wi] -= summand_i
-
+            
 #             # RHS vector b
 #             b[wi] += 0.5 * beta_i
 #             b[li] -= 0.5 * beta_i
-
+        
 #         print("H matrix made")
         # Gradient descent setup
         
@@ -462,7 +581,7 @@ class PolyaGamma_EM_2_0:
         prev_r = self.r.clone()
         prev_beta = self.beta.clone()
         prev_ll = -float("inf")
-
+        
 #         print(prev_r, prev_beta, "max iter: ", self.max_iter)
 
         for iter in tqdm(range(self.max_iter)):

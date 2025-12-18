@@ -51,7 +51,7 @@ K_array = [2, 2, 6, 8, 8, 10, 10, 50, 50]
 m = 5000
 
 # CSV output
-csv_file = "results/new_0_1_comparison_metrics_10.csv"
+csv_file = "results/final_0_1_comparison_metrics_10.csv"
 os.makedirs("results", exist_ok=True)
 
 # -------------------------
@@ -99,7 +99,7 @@ with open(csv_file, mode='w', newline='') as f:
     writer.writerow(header)
 
 
-
+max_iter = 100
 # -------------------------
 # Main experiment loop
 # -------------------------
@@ -149,7 +149,7 @@ for N, K in zip(N_array, K_array):
         
         for seed in range(10, 20):
             # --- 1. Run the EM algorithm (Keep this section) ---
-            pg = EMWrapper(PC_faceage, max_iter=500, device=device, random_seed=seed)
+            pg = EMWrapper(PC_faceage, max_iter=max_iter, device=device, random_seed=seed)
             r_est_tensor, beta_est_tensor, ll = pg.run_algorithm()
 
             # --- 2. Convert to NumPy once for unified processing (Improvement) ---
@@ -297,7 +297,7 @@ for N, K in zip(N_array, K_array):
         
         for seed in range(10):
             try:
-                crowdbt_test = opt_fair.CrowdBT_2_0(data=PC_faceage, penalty=0, device=device, random_seed=seed)
+                crowdbt_test = opt_fair.CrowdBT_3_0(data=PC_faceage, penalty=0, device=device, random_seed=seed)
                 crowdbt_scores, _ = crowdbt_test.alternate_optim(size, K)
                 crowdbt_scores_np = to_numpy(crowdbt_scores)
                 acc = compute_acc(gt_df, crowdbt_scores_np, device)
