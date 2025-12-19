@@ -192,39 +192,39 @@ class PolyaGamma_EM:
         # Apply zero-mean constraint
         self.r = r - r.mean()
 
-#     def _torch_cg(self, A_sparse, b, r0=None, max_iter=500, tol=1e-5, reg=1e-8):
-#         """
-#         Pure PyTorch implementation of Conjugate Gradient.
-#         Solves (A + reg*I)x = b
-#         """
-#         x = r0 if r0 is not None else torch.zeros_like(b)
+    def _torch_cg(self, A_sparse, b, r0=None, max_iter=500, tol=1e-5, reg=1e-8):
+        """
+        Pure PyTorch implementation of Conjugate Gradient.
+        Solves (A + reg*I)x = b
+        """
+        x = r0 if r0 is not None else torch.zeros_like(b)
 
-#         # Helper for matrix-vector product (A + reg*I) @ x
-#         def mvp(v):
-#             return torch.matmul(A_sparse, v.unsqueeze(1)).squeeze(1) + reg * v
+        # Helper for matrix-vector product (A + reg*I) @ x
+        def mvp(v):
+            return torch.matmul(A_sparse, v.unsqueeze(1)).squeeze(1) + reg * v
 
-#         r = b - mvp(x)
-#         if torch.norm(r) < tol:
-#             return x
+        r = b - mvp(x)
+        if torch.norm(r) < tol:
+            return x
 
-#         p = r.clone()
-#         rdotr = torch.dot(r, r)
+        p = r.clone()
+        rdotr = torch.dot(r, r)
 
-#         for i in range(max_iter):
-#             Ap = mvp(p)
-#             alpha = rdotr / torch.dot(p, Ap)
-#             x = x + alpha * p
-#             r = r - alpha * Ap
+        for i in range(max_iter):
+            Ap = mvp(p)
+            alpha = rdotr / torch.dot(p, Ap)
+            x = x + alpha * p
+            r = r - alpha * Ap
 
-#             new_rdotr = torch.dot(r, r)
-#             if torch.sqrt(new_rdotr) < tol:
-#                 break
+            new_rdotr = torch.dot(r, r)
+            if torch.sqrt(new_rdotr) < tol:
+                break
 
-#             beta = new_rdotr / rdotr
-#             p = r + beta * p
-#             rdotr = new_rdotr
+            beta = new_rdotr / rdotr
+            p = r + beta * p
+            rdotr = new_rdotr
 
-#         return x
+        return x
 #     def _torch_cg(self, A_sparse, b, r0=None, max_iter=500, tol=1e-5, reg=1e-8):
 #         """
 #         Pure PyTorch implementation of Conjugate Gradient.
@@ -269,74 +269,74 @@ class PolyaGamma_EM:
 #                 raise ValueError(f"NaN detected in residual or solution at iteration {i}")
 
 #         return x
-    import torch
+#     import torch
 
-    def _torch_cg(self, A_sparse, b, r0=None, max_iter=500, tol=1e-5, reg=1e-8):
-        # 1. High-precision promotion
-        orig_dtype = b.dtype
-        b_64 = b.detach().to(torch.float64)
-        A_64 = A_sparse.detach().to(torch.float64)
-        x = r0.to(torch.float64) if r0 is not None else torch.zeros_like(b_64)
+#     def _torch_cg(self, A_sparse, b, r0=None, max_iter=500, tol=1e-5, reg=1e-8):
+#         # 1. High-precision promotion
+#         orig_dtype = b.dtype
+#         b_64 = b.detach().to(torch.float64)
+#         A_64 = A_sparse.detach().to(torch.float64)
+#         x = r0.to(torch.float64) if r0 is not None else torch.zeros_like(b_64)
 
-        def mvp(v):
-            if A_64.is_sparse:
-                return torch.sparse.mm(A_64, v.unsqueeze(1)).squeeze(1) + reg * v
-            return torch.matmul(A_64, v.unsqueeze(1)).squeeze(1) + reg * v
+#         def mvp(v):
+#             if A_64.is_sparse:
+#                 return torch.sparse.mm(A_64, v.unsqueeze(1)).squeeze(1) + reg * v
+#             return torch.matmul(A_64, v.unsqueeze(1)).squeeze(1) + reg * v
 
-        # 2. Construct Diagonal Preconditioner (Jacobi)
-        # Extract diagonal: A_ii + reg
-        if A_64.is_sparse:
-            # For sparse COO, find indices where row == col
-            indices = A_64._indices()
-            values = A_64._values()
-            mask = (indices[0] == indices[1])
-            diag = torch.zeros(b_64.size(0), device=b_64.device, dtype=torch.float64)
-            diag[indices[0][mask]] = values[mask]
-            diag += reg
-        else:
-            diag = torch.diag(A_64) + reg
+#         # 2. Construct Diagonal Preconditioner (Jacobi)
+#         # Extract diagonal: A_ii + reg
+#         if A_64.is_sparse:
+#             # For sparse COO, find indices where row == col
+#             indices = A_64._indices()
+#             values = A_64._values()
+#             mask = (indices[0] == indices[1])
+#             diag = torch.zeros(b_64.size(0), device=b_64.device, dtype=torch.float64)
+#             diag[indices[0][mask]] = values[mask]
+#             diag += reg
+#         else:
+#             diag = torch.diag(A_64) + reg
 
-        # M_inv scales the residual to be near 1.0 based on the matrix scale
-        M_inv = 1.0 / (diag + 1e-12) 
+#         # M_inv scales the residual to be near 1.0 based on the matrix scale
+#         M_inv = 1.0 / (diag + 1e-12) 
 
-        r = b_64 - mvp(x)
-        z = M_inv * r  # This is your "scaled" residual
-        p = z.clone()
-        rdotz = torch.dot(r, z)
+#         r = b_64 - mvp(x)
+#         z = M_inv * r  # This is your "scaled" residual
+#         p = z.clone()
+#         rdotz = torch.dot(r, z)
 
-        if torch.sqrt(rdotz) < tol:
-            return x.to(orig_dtype)
+#         if torch.sqrt(rdotz) < tol:
+#             return x.to(orig_dtype)
 
-        for i in range(max_iter):
-            Ap = mvp(p)
+#         for i in range(max_iter):
+#             Ap = mvp(p)
 
-            denom = torch.dot(p, Ap)
-            if denom <= 1e-16: # Stability break
-                break
+#             denom = torch.dot(p, Ap)
+#             if denom <= 1e-16: # Stability break
+#                 break
 
-            alpha = rdotz / denom
-            x = x + alpha * p
+#             alpha = rdotz / denom
+#             x = x + alpha * p
 
-            # Periodic refresh for stability
-            if i % 50 == 0:
-                r = b_64 - mvp(x)
-            else:
-                r = r - alpha * Ap
+#             # Periodic refresh for stability
+#             if i % 50 == 0:
+#                 r = b_64 - mvp(x)
+#             else:
+#                 r = r - alpha * Ap
 
-            z = M_inv * r  # Apply scaling/preconditioning
-            new_rdotz = torch.dot(r, z)
+#             z = M_inv * r  # Apply scaling/preconditioning
+#             new_rdotz = torch.dot(r, z)
 
-            if torch.norm(r) < tol:
-                break
+#             if torch.norm(r) < tol:
+#                 break
 
-            beta = new_rdotz / (rdotz + 1e-16)
-            p = z + beta * p
-            rdotz = new_rdotz
+#             beta = new_rdotz / (rdotz + 1e-16)
+#             p = z + beta * p
+#             rdotz = new_rdotz
 
-            if torch.isnan(x).any():
-                break
+#             if torch.isnan(x).any():
+#                 break
 
-        return x.to(orig_dtype)
+#         return x.to(orig_dtype)
     
     def _check_convergence(self, prev_r, prev_beta):
         r_diff = torch.norm(self.r - prev_r)

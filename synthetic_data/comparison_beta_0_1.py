@@ -33,7 +33,7 @@ from distribution_utils import crowd_bt_dist, logistic_preference_dist, comparis
 # Environment / seeds
 # -------------------------
 # If you want to force a specific GPU, set CUDA_VISIBLE_DEVICES before torch touches CUDA.
-# os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print("Using device:", device)
 
@@ -151,7 +151,12 @@ for N, K in zip(N_array, K_array):
             # --- 1. Run the EM algorithm (Keep this section) ---
             pg = EMWrapper(PC_faceage, max_iter=max_iter, device=device, random_seed=seed)
             r_est_tensor, beta_est_tensor, ll = pg.run_algorithm()
-
+            
+            # Skip if ANY element is NaN
+            if np.isnan(r_est_tensor).any() or np.isnan(beta_est_tensor).any() or np.isnan(ll):
+                print("Skipping nan")
+                continue
+            
             # --- 2. Convert to NumPy once for unified processing (Improvement) ---
             # Convert the estimated item scores (r_est) to a NumPy array immediately.
             r_est_np = to_numpy(r_est_tensor)
@@ -233,48 +238,6 @@ for N, K in zip(N_array, K_array):
         RC_waccs.append(RC_wacc)
         RC_taus.append(RC_tau)
         
-
-#         # --- Initialization ---
-#         FactorBT_accs, FactorBT_waccs, FactorBT_taus = [], [], []
-
-#         for seed in range(10):
-#             try:
-#                 # 1. Initialize the custom model
-#                 # The 'data' dictionary and 'classes' list must be prepared
-#                 # based on your 'df' structure.
-#                 agg_factorbt = opt_fair.FactorBT(
-#                     data=PC_faceage,
-#                     classes=classes,
-#                     device=device,
-#                     seed=seed  # Use the current loop seed for reproducibility
-#                 )
-
-#                 # 2. Fit and Predict (Run the alternating optimization)
-#                 # x0 are the item scores (params), y0 and z0 are the reviewer biases
-#                 factorbt_scores_tensor, y0, z0 = agg_factorbt.alternate_optim(iters=100)
-
-#                 # 3. Convert scores to numpy for evaluation
-#                 factorbt_scores = factorbt_scores_tensor.cpu().detach().numpy()
-#                 acc = compute_acc(gt_df, factorbt_scores, device)
-#                 if acc < 0.5:
-#                     factorbt_scores = -factorbt_scores
-#                 # 4. Evaluation (Assuming your evaluation functions work with numpy array)
-#                 FactorBT_acc = compute_acc(gt_df, factorbt_scores, device)
-#                 FactorBT_wacc = compute_weighted_acc(gt_df, factorbt_scores, device)
-#                 FactorBT_tau = safe_kendalltau(factorbt_scores, gt_df['score'].to_numpy())
-
-#                 FactorBT_accs.append(FactorBT_acc)
-#                 FactorBT_waccs.append(FactorBT_wacc)
-#                 FactorBT_taus.append(FactorBT_tau)
-
-#             except Exception as e:
-#                 print(f"Custom FactorBT failed for seed={seed} with error: {e}")
-#                 # If the model fails, append zeros or a sentinel value
-#                 FactorBT_accs.append(0.0)
-#                 FactorBT_waccs.append(0.0)
-#                 FactorBT_taus.append(0.0)
-
-
         # === FactorBT (NoisyBradleyTerry from crowdkit) ===
         try:
             agg_noisybt = NoisyBradleyTerry(n_iter=10).fit_predict(df)
@@ -299,7 +262,12 @@ for N, K in zip(N_array, K_array):
             try:
                 crowdbt_test = opt_fair.CrowdBT_3_0(data=PC_faceage, penalty=0, device=device, random_seed=seed)
                 crowdbt_scores, _ = crowdbt_test.alternate_optim(size, K)
+                
                 crowdbt_scores_np = to_numpy(crowdbt_scores)
+                if np.isnan(crowdbt_scores_np).any():
+                    print("Skipping nan")
+                    continue
+                
                 acc = compute_acc(gt_df, crowdbt_scores_np, device)
                 if acc < 0.5:
                     crowdbt_scores_np = -crowdbt_scores_np
@@ -309,9 +277,7 @@ for N, K in zip(N_array, K_array):
                 CrowdBT_taus.append(safe_kendalltau(crowdbt_scores_np, gt_df['score'].to_numpy()))
             except Exception as e:
                 print(f"CrowdBT seed {seed} failed for N={N},K={K} with error {e}; appending zeros")
-                CrowdBT_accs.append(0.0)
-                CrowdBT_waccs.append(0.0)
-                CrowdBT_taus.append(0.0)
+                continue
 
 
         
