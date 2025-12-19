@@ -15,9 +15,10 @@ class GradientEMWrapper:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
-            
-        self.comparisons = self._get_compatible_data(df_by_worker)
+        
         random.seed(self.random_seed)
+        self.comparisons = self._get_compatible_data(df_by_worker)
+        
 
         self.num_workers = len(df_by_worker)
         max_index = max(
