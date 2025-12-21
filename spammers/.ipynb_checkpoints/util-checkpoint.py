@@ -1,4 +1,5 @@
 from collections import *
+from pathlib import Path
 
 def df_to_pickle(df, df_faceage):
     df.rename(columns={"performer": "worker"}, inplace=True)
@@ -45,7 +46,7 @@ def df_to_pickle_faceage(df, df_faceage):
     print(f"Unique performers: {len(unique_performers)}")
 
     performer_label_dict = {performer: i for i, performer in enumerate(unique_performers)}
-
+    
     # Map items to integer IDs
     item_labels = list(df_faceage["full_path"])
     item_label_dict = {item: i for i, item in enumerate(item_labels)}
@@ -60,9 +61,9 @@ def df_to_pickle_faceage(df, df_faceage):
         for _, row in group.iterrows():
             total_pairs += 1
 
-            left = row["left"]
-            right = row["right"]
-            winner = row["label"]  # whichever side was chosen
+            left = Path(row["left"]).name
+            right = Path(row["right"]).name
+            winner = Path(row["label"]).name  # whichever side was chosen
 
             # Map to indices
             left_label = item_label_dict[left]
