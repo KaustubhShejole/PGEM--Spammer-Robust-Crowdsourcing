@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e  # stop script on error
 
-for i in {1..12}
+for i in {1..24}
 do
     echo "Run #$i at $(date)"
 
@@ -14,8 +14,8 @@ do
         echo "No changes to commit"
     fi
 
-    # sleep 20 minutes (1200 seconds), but not after last run
-    if [ "$i" -lt 12 ]; then
-        sleep 1200
+    # sleep 30 minutes (1800 seconds), but not after last run
+    if [ "$i" -lt 24 ]; then
+        sleep 1800
     fi
 done
