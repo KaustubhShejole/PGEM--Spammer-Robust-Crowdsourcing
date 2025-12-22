@@ -14,8 +14,8 @@ do
         echo "No changes to commit"
     fi
 
-    # sleep 30 minutes (1800 seconds), but not after last run
+    # sleep 20 minutes (1200 seconds), but not after last run
     if [ "$i" -lt 24 ]; then
-        sleep 1800
+        sleep 1200
     fi
 done
